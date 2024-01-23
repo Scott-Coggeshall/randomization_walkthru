@@ -1,0 +1,231 @@
+---
+title: "Performing Randomization in R"
+author: "Scott Coggeshall"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+In this document we will illustrate different techniques for generating randomized treatment assignments using R. We will consider three different types of randomization. They are (in increasing order of complexity): simple randomization, block randomization, and stratified block randomization.
+
+Before we look at randomization, though, we'll say a few things about generating random numbers from probability distributions in R.
+
+# Working with Distributions in R
+
+Because R was created for statistical programming, it has built-in functions for working with common probability distributions.
+These built-in functions allow us to do things like calculate probabilities, find specific quantiles of a distribution, and (most importanlty for our purposes) generate random numbers from a specified probability distribution.
+
+Commonly used distributions supported by base R include the normal distribution, the binomial distribution, the uniform distribution, and many others. For a full list of supported distributions and additional details about functions for working with them, run
+
+
+```{r, eval = FALSE, echo = TRUE}
+help(Distributions)
+```
+
+
+
+
+# Generating Random Numbers in R
+As mentioned above, R provides built-in functions for generating random numbers that follow a particular probability distribution. These functions follow the naming convention `rxxxx` where `r` stands for `random` and `xxxx` is a shorthand descriptor for the probability distribution of interest. For instance, to generate 1000 random numbers from a normal distribution with mean 0 and standard deviation 1, we would use the `rnorm` function:
+
+```{r rnorm_example, echo = TRUE}
+set.seed(3232)
+x  <- rnorm(n = 1000)
+```
+
+This code generates 1000 samples from a standard normal distribution and assigns them to the vector `x`. A histogram shows that numbers do appear to follow a normal distribution centered around 0 with a standard deviation of 1:
+
+```{r rnorm_histogram, echo = FALSE}
+
+hist(x)
+
+```
+
+Each time we call an `rxxxx` function to generate random numbers, we will get a different set of results:
+
+```{r, echo = TRUE}
+# first run
+rnorm(n = 10)
+
+# second run
+rnorm(n = 10)
+```
+
+This immediately raises the question of how we can make our results reproducible when generating random numbers. The answer is a function called `set.seed`. This function takes a single integer (the seed) as input, and allows us to regenerate the same set of random numbers if needed. 
+
+```{r setseed_example, echo = TRUE}
+# set the seed so we can reproduce the results
+set.seed(43422) # note: the number 43422 was picked arbitrarily
+
+# first run - generate 10 random numbers
+rnorm(10)
+
+# second run - generate another 10 random numbers
+rnorm(10) # the results are different
+
+# "reset" the seed so we can regenerate the numbers from the first run
+set.seed(43422)
+
+# third run - same results as the first run!
+rnorm(10)
+
+```
+
+
+A typical way of ensuring reproducibility when working with random numbers is to include a call to the `set.seed` function at the top of your script, BEFORE you start generating any random numbers.
+That way, you will get the same results every time you run the script. In addition, anyone trying to reproduce your work will also get the same set of numbers (with some caveats).
+
+
+# Randomization in R
+
+With those preliminaries out of the way, we'll now discuss how to generate randomized treatment assignments in R. 
+We'll look at three different types of randomization of increasing complexity: simple randomization, block randomization, and stratified block randomization. Let's start with simple randomization.
+
+# Simple Randomization
+Our workhorse will be the `rbinom` function. This function generates random draws from a binomial distribution. It takes three arguments:
+
+- `n`: the number of random draws to produce
+- `size`: the number of "trials" 
+- `prob`: the probability of success for each trial
+
+By specifiying `size = 1` and `prob = 0.5`, we can mimic the process of flipping a fair coin `n` times.  
+
+```{r rbinom_cointoss, echo = TRUE}
+rbinom(n = 10, size = 1, prob = 0.5)
+```
+Here, 1s represent success/Heads/Yes, etc and 0s represent failure/Tails/No, etc. In our case, we can let 1 correspond to Intervention and 0 correspond to Control.
+
+
+Simple randomization involves generating a long sequence of these random 0/1 coin flips, and then assigning participants to intervention arms on the basis of those coin flips. 
+
+Let's illustrate this using a hypothetical trial that wants to enroll 50 people on a rolling basis (i.e. participants will be enrolled and randomized over time rather than all at once at the beginning of the study).
+
+We'll start by generating a dataset that contains study ids, treatment assignments, and an indicator for whether a participant has been randomized to that study id yet. At this point no one has been enrolled, so all of the indicators will be `FALSE`.
+
+```{r, echo = TRUE }
+simplerandomization_data <- data.frame(study_id = 1:1000, treatment_assignment = rbinom(n = 1000, size = 1, prob = 0.5), randomized = rep(FALSE, 1000))
+
+head(simplerandomization_data)
+```
+
+Randomization can now proceed as follows. When an eligible participant is found (e.g. at a doctor's visit, or through the EMR), enrolled, and ready to be randomized, a study coordinator will contact the unblinded study statistician or analyst, letting them know that a treatment assignment is needed. The statistician/analyst will then look at the dataset of treatment assignments and find the the first study id with `randomized = FALSE`. The statistician/analyst will then let the study coordinator know the study id and randomized treatment assignment for the newly enrolled participant. The statistician/analyst will then update the dataset, changing the `randomized` field for that study id from `FALSE` to `TRUE`.
+
+This process would be repeated until the sample size of $n = 50$ participants has been reached. Note that we have generated far more randomized treatment assignments than we actually needed. This is fine, and is generally done in order to ensure that we don't "run out" of treatment assignments and have to generate more later on.
+
+# Block Randomization
+
+Simple randomization is a 100% valid way of producing randomized treatment assignments. However, it has the drawback of only guaranteeing the desired 50/50 split between intervention and control arms *probabilistically*. This means that simple randomization will work great on average or with large samples. But for any one trial, the split between intervention and control may be off from 50/50, especially if the number of enrolled participants is not that big. 
+
+An alternative to simple randomization that does a better job of maintaining a 50/50 split between assignments to intervention and control is **block randomization**. In block randomization, we generate treatment assignments in blocks of a pre-determined size, ensuring that half of the assignments in each block are for the intervention arm and half of the assignments are for the control arm. This guarantees that the number of people assigned to treatment is always roughly equal to the number assigned to control. 
+
+As an example, let's consider block randomization with a block size of 4. This means we will generate treatment assignments 4 at a time, with exactly 2 of the 4 treatment assignments being Intervention and 2 of the 4 treatment assignments being Control. Since the number of Intervention and Control assignments in each block is fixed, we add randomness by randomly choosing the *order* in which the assignments appear. This ensures that participants are assigned to the treatment arms randomly and prevents study staff from knowing which treatment assignment the next participant will be given.
+
+For a block size of 4, there are 6 possible blocks consisting of two intervention assignments and two control assignments:
+
+- $(0, 0, 1, 1)$
+- $(0, 1, 0, 1)$
+- $(1, 0, 0, 1)$
+- $(0, 1, 1, 0)$
+- $(1, 0, 1, 0)$
+- $(1, 1, 0, 0)$
+
+We can construct the randomized treatment assignments for our trial by repeatedly sampling *blocks* at random.
+
+
+
+```{r block_randomization, echo = TRUE}
+
+# define our blocks and put them into a list
+block_1  <- c(0, 0, 1, 1)
+block_2  <- c(0, 1, 0, 1)
+block_3  <- c(1, 0, 0, 1)
+block_4  <- c(0, 1, 1, 0)
+block_5  <- c(1, 0, 1, 0)
+block_6  <- c(1, 1, 0, 0)
+
+block_list  <- list(block_1, block_2, block_3, block_4, block_5, block_6)
+
+# create 1000 randomized treatment assignments by 
+# randomly sampling one of the six blocks 250 times.
+# note that because block_list is a list, the output from 
+# sample will also be a list
+
+tx_assignments_list <- sample(block_list, size = 250, replace = TRUE)
+
+# unlist to get a numeric vector of treatment assignments
+
+tx_assignments <- unlist(tx_assignments_list)
+
+blockrandomization_dataset <- data.frame(sample_id = 1:1000, 
+					 treatment_assignment = tx_assignments)
+
+
+head(blockrandomization_dataset)
+```
+
+As before, the dataset we created could be used as part of a manual
+process of randomizing patients or can serve as the basis for
+a randomization scheme uploaded to RedCAP.
+
+
+# Stratified Block Randomization
+
+Let's now look at stratified block randomization. 
+The goal of stratified block randomization is to ensure that we achieve a 50/50 split between the intervention and control arms not just in the overall sample, but also within levels of a set of pre-specified covariates. The pre-specified covariates are referred to as the stratification variables and the combinations of the covariates are referred to as the strata.
+
+As a concrete example, let's suppose that we have two study sites, Site A and Site B, and that we want to stratify on site as well as an indicator for being over the age of 65. We therefore have two stratification variables with two levels each, for a total of 4 strata:
+
+- Strata 1: Site A, Age $\leq 65$
+- Strata 2: Site A, Age $> 65$
+- Strata 3: Site B, Age $\leq 65$
+- Strata 4: Site B, Age $> 65$
+
+To perform stratified block randomization, we generate 4 independent sets of treatment assignments, one for each strata, using block randomization to ensure balance between treatment arms within each strata. 
+
+
+```{r stratified_datasets, echo = TRUE}
+
+# do block randomization using blocks of size 4
+# for each of the 4 strata, 
+# using the block_list variable created earlier
+
+tx_assignments_strata1  <- unlist(sample(block_list, size = 250, replace = TRUE))
+
+tx_assignments_strata2  <- unlist(sample(block_list, size = 250, replace = TRUE))
+
+tx_assignments_strata3  <- unlist(sample(block_list, size = 250, replace = TRUE))
+
+tx_assignments_strata4  <- unlist(sample(block_list, size = 250, replace = TRUE))
+
+
+# put them into a dataset with study ids as before.
+# study ids have the form [number][letter] where
+# the letters A-D are used to refer strata and 
+# the numbers 1-1000 are used to refer to individuals
+# within strata
+
+id_strata1 <- paste0(1:1000, "A")
+id_strata2 <- paste0(1:1000, "B")
+id_strata3 <- paste0(1:1000, "C")
+id_strata4 <- paste0(1:1000, "D")
+
+stratifiedblock_dataset <- data.frame(study_id = c(id_strata1, id_strata2, id_strata3, id_strata4), strata = rep(c("A", "B", "C", "D"), each = 1000), treatment_assignment = c(tx_assignments_strata1, tx_assignments_strata2, tx_assignments_strata3, tx_assignments_strata4), randomized = FALSE)
+
+# check out first 5 rows for each strata
+stratifiedblock_dataset[c(1:5, 1001:1005, 2001:2005, 3001:3005), ]
+
+
+```
+
+Manual randomziation could be conducted as follows. When a new participant is ready to randomized, the study coordinator notifies the statistician/analyst and lets them know which strata they participant belongs to. The statistician/analyst then finds the treatment assignment for the next unrandomized study id in the corresponding strata and provides it to the study coordinator. The statistician/analyst then updates the dataset to mark that study id as having been randomized.
+
+Alternatively (and preferably), the stratified block randomization dataset we created could be used as the basis for an automated randomization routine using REDCap.
+
+
+
+
